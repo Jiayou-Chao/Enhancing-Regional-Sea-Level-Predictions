@@ -1,0 +1,358 @@
+---
+title: "Forecast with USEM coefficietns"
+author: "Jiecheng Song"
+date: "5/27/2022"
+output: pdf_document
+---
+
+```{r}
+library(timeSeries)
+library(tseries)
+library(forecast)
+library(ggplot2)
+library(pracma)
+library(astsa)
+library(ggpubr)
+library(lavaan)
+```
+
+```{r}
+climate <- read.csv('../data/Data_with_perma/YearData.csv')
+climate.l <- cbind(climate[-1,], climate[-72,])
+names(climate.l)[12:22] <- paste(names(climate.l)[12:22],'.l', sep = '')
+# normalize our data
+normalize <- function(x) return((x-mean(x))/sd(x))
+climate_norm <- subset(climate, select = -c(Year,CO2,N2O,CH4))
+climate_norm <- sapply(climate_norm,normalize)
+climate_norm <- as.data.frame(climate_norm)
+climate_norm.l <- cbind(climate_norm[-1,], climate_norm[-72,]) 
+names(climate_norm.l)[8:14] <- paste(names(climate_norm.l)[8:14],'.l', sep = '')
+climate_norm.l <- data.frame(climate_norm.l)
+```
+
+```{r}
+GMSL_mean <- mean(climate$GMSL)
+TEMP_mean <- mean(climate$TEMP)
+GMSL_sd <- sd(climate$GMSL)
+TEMP_sd <- sd(climate$TEMP)
+denormalize <- function(x, mu, sigma){
+  new_x <- (x * sigma) + mu
+  return(new_x)
+}
+```
+
+```{r}
+library(lavaan)
+
+mod_formula <- '
+    GMSL ~ GMSL.l + Mass.l + SeaIce.l + TEMP + 1
+    Mass ~ Mass.l + TEMP + 1
+    SeaIce ~ SeaIce.l + Mass.l + TEMP + 1
+    TEMP ~ TEMP.l + humidity + humidity.l + GWP.l + 1
+    humidity ~ humidity.l + TEMP.l + 1
+'
+model <- sem(mod_formula, data=climate_norm.l)
+coef <- summary(model)$pe
+```
+
+```{r}
+humidity_res <- climate_norm.l$humidity - coef$est[coef$lhs == 'humidity' & coef$op == '~1'] -  coef$est[coef$lhs == 'humidity' & coef$rhs == 'humidity.l'] * climate_norm.l$humidity.l - coef$est[coef$lhs == 'humidity' & coef$rhs == 'TEMP.l'] * climate_norm.l$TEMP.l
+
+TEMP_res <- climate_norm.l$TEMP - coef$est[coef$lhs == 'TEMP' & coef$op == '~1'] - coef$est[coef$lhs == 'TEMP' & coef$rhs == 'humidity.l'] * climate_norm.l$humidity.l - coef$est[coef$lhs == 'TEMP' & coef$rhs == 'TEMP.l'] * climate_norm.l$TEMP.l - coef$est[coef$lhs == 'TEMP' & coef$rhs == 'humidity'] * climate_norm.l$humidity - coef$est[coef$lhs == 'TEMP' & coef$rhs == 'GWP.l'] * climate_norm.l$GWP.l
+
+Mass_res <- climate_norm.l$Mass - coef$est[coef$lhs == 'Mass' & coef$op == '~1'] - coef$est[coef$lhs == 'Mass' & coef$rhs == 'Mass.l'] * climate_norm.l$Mass.l - coef$est[coef$lhs == 'Mass' & coef$rhs == 'TEMP'] * climate_norm.l$TEMP
+
+SeaIce_res <- climate_norm.l$SeaIce - coef$est[coef$lhs == 'SeaIce' & coef$op == '~1'] - coef$est[coef$lhs == 'SeaIce' & coef$rhs == 'Mass.l'] * climate_norm.l$Mass.l - coef$est[coef$lhs == 'SeaIce' & coef$rhs == 'TEMP'] * climate_norm.l$TEMP - coef$est[coef$lhs == 'SeaIce' & coef$rhs == 'SeaIce.l'] * climate_norm.l$SeaIce.l
+
+GMSL_res <- climate_norm.l$GMSL - coef$est[coef$lhs == 'GMSL' & coef$op == '~1'] - coef$est[coef$lhs == 'GMSL' & coef$rhs == 'Mass.l'] * climate_norm.l$Mass.l - coef$est[coef$lhs == 'GMSL' & coef$rhs == 'TEMP'] * climate_norm.l$TEMP - coef$est[coef$lhs == 'GMSL' & coef$rhs == 'SeaIce.l'] * climate_norm.l$SeaIce.l - coef$est[coef$lhs == 'GMSL' & coef$rhs == 'GMSL.l'] * climate_norm.l$GMSL.l 
+```
+
+```{r}
+k = 2
+adf.test(humidity_res, k = k)
+adf.test(TEMP_res, k = k)
+adf.test(SeaIce_res, k = k)
+adf.test(Mass_res, k = k)
+adf.test(GMSL_res, k = k)
+```
+
+
+# Fit GWP
+
+```{r}
+fit_GWP <- Arima(climate$GWP,order = c(1,1,1), include.drift =  T, method = 'ML')
+pred_GWP_no <- forecast::forecast(fit_GWP, h = 79)
+pred_GWP_no$x <- ts(pred_GWP_no$x, start = 1950, end = 2021)
+pred_GWP_no$mean <- ts(pred_GWP_no$mean, start = 2022, end = 2100)
+pred_GWP_no$lower <- ts(pred_GWP_no$lower, start = 2022, end = 2100)
+pred_GWP_no$upper <- ts(pred_GWP_no$upper, start = 2022, end = 2100)
+pred_GWP_no %>%
+  autoplot() + ylab("GWP prediction") + xlab('Year') +
+  scale_x_continuous(breaks = seq(1950,2100,10))
+```
+
+```{r}
+fit_N2O <- Arima(climate$N2O, order = c(1,1,1), include.drift = T, method = 'ML')
+pred_N2O_no <- forecast(fit_N2O, h = 79)$mean
+
+CO2_2010 <- climate$CO2[61] - climate$CO2[60]
+pred_CO2_cop <- c(climate$CO2[72] + cumsum(CO2_2010 - (1:9)/9*(CO2_2010*0.45)))
+pred_CO2_cop <- c(pred_CO2_cop, rep(pred_CO2_cop[9],70))
+
+CH4_2020 <- climate$CH4[71] - climate$CH4[70]
+pred_CH4_cop <- c(climate$CH4[72] + cumsum(CH4_2020 - (1:9)/9*(CH4_2020*0.3)))
+pred_CH4_cop <- c(pred_CH4_cop, rep(pred_CH4_cop[9],70))
+
+pred_GWP_cop_mean <- pred_CO2_cop + 28/1000* pred_CH4_cop + 265/1000 * pred_N2O_no
+```
+
+```{r}
+pred_GWP_cop <- pred_GWP_no
+pred_GWP_cop$mean <- pred_GWP_cop$mean - pred_GWP_no$mean + ts(pred_GWP_cop_mean, start = 2022)
+
+pred_GWP_cop$lower[,1] <- pred_GWP_cop$mean - (pred_GWP_no$mean - pred_GWP_no$lower[,1]) * pred_GWP_cop$mean/pred_GWP_no$mean
+
+pred_GWP_cop$lower[,2] <- pred_GWP_cop$mean - (pred_GWP_no$mean - pred_GWP_no$lower[,2]) * pred_GWP_cop$mean/pred_GWP_no$mean
+
+pred_GWP_cop$upper[,1] <- pred_GWP_cop$mean - (pred_GWP_no$mean - pred_GWP_no$upper[,1]) * pred_GWP_cop$mean/pred_GWP_no$mean
+
+pred_GWP_cop$upper[,2] <- pred_GWP_cop$mean - (pred_GWP_no$mean - pred_GWP_no$upper[,2]) * pred_GWP_cop$mean/pred_GWP_no$mean
+
+pred_GWP_cop  %>%
+  autoplot() + ylab("GWP prediction with COP26 scenario")+ xlab('Year') +
+  scale_x_continuous(breaks = seq(1950,2100,10))
+```
+
+```{r}
+GWP <- data.frame(Year = 1950:2100, GWP_no = c(pred_GWP_no$x,pred_GWP_no$mean), 
+                  GWP_cop = c(pred_GWP_cop$x,pred_GWP_cop$mean), 
+                  GWP_no_80_l = c(rep(NA,71),climate$GWP[72],pred_GWP_no$lower[,1]),
+                  GWP_no_95_l = c(rep(NA,71),climate$GWP[72],pred_GWP_no$lower[,2]), 
+                  GWP_no_80_u = c(rep(NA,71),climate$GWP[72],pred_GWP_no$upper[,1]),
+                  GWP_no_95_u = c(rep(NA,71),climate$GWP[72],pred_GWP_no$upper[,2]),
+                  GWP_cop_80_l = c(rep(NA,71),climate$GWP[72],pred_GWP_cop$lower[,1]),
+                  GWP_cop_95_l = c(rep(NA,71),climate$GWP[72],pred_GWP_cop$lower[,2]), 
+                  GWP_cop_80_u = c(rep(NA,71),climate$GWP[72],pred_GWP_cop$upper[,1]),
+                  GWP_cop_95_u = c(rep(NA,71),climate$GWP[72],pred_GWP_cop$upper[,2]))
+
+GWP$GWP_no_99_u <- GWP$GWP_no + (GWP$GWP_no_95_u - GWP$GWP_no)/qnorm(0.975)*qnorm(0.995)
+GWP$GWP_no_99_l <- GWP$GWP_no - (GWP$GWP_no_95_u - GWP$GWP_no)/qnorm(0.975)*qnorm(0.995)
+GWP$GWP_cop_99_u <- GWP$GWP_cop + (GWP$GWP_cop_95_u - GWP$GWP_cop)/qnorm(0.975)*qnorm(0.995)
+GWP$GWP_cop_99_l <- GWP$GWP_cop - (GWP$GWP_cop_95_u - GWP$GWP_cop)/qnorm(0.975)*qnorm(0.995)
+```
+
+```{r}
+fit_GWP_norm <- Arima(climate_norm$GWP,order = c(1,1,1), include.drift =  T, method = 'ML')
+pred_GWP_norm_no <- forecast::forecast(fit_GWP_norm, h = 79)
+pred_GWP_norm_cop <- (pred_GWP_cop$mean - mean(climate$GWP))/sd(climate$GWP)
+```
+
+# Mean Estimate
+
+```{r}
+# A * yt = B yt-1 + epison
+estimate_no <- matrix(c(1,climate_norm$GWP[71], climate_norm$GWP[72], climate_norm$humidity[72], climate_norm$TEMP[72], climate_norm$Mass[72], climate_norm$SeaIce[72], climate_norm$GMSL[72]),nrow = 8)
+
+A <- matrix(c(1,rep(0,6),
+              0,1,rep(0,5),
+              0,0,1,rep(0,4),
+              0,0,-coef$est[coef$lhs == 'TEMP' & coef$rhs == 'humidity'],1,rep(0,3),
+              rep(0,3),-coef$est[coef$lhs == 'Mass' & coef$rhs == 'TEMP'],1,0,0,
+              rep(0,3),-coef$est[coef$lhs == 'SeaIce' & coef$rhs == 'TEMP'],0,1,0,
+              rep(0,3),-coef$est[coef$lhs == 'GMSL' & coef$rhs == 'TEMP'],0,0,1), byrow = T, nrow= 7)
+
+B <- matrix(c(0,0,1,rep(0,5),
+              fit_GWP_norm$coef[3]*(1-fit_GWP_norm$coef[1]),-fit_GWP_norm$coef[1],1+fit_GWP_norm$coef[1],rep(0,5),
+              coef$est[coef$lhs == 'humidity' & coef$op == '~1'], 0,0,coef$est[coef$lhs == 'humidity' & coef$rhs == 'humidity.l'],coef$est[coef$lhs == 'humidity' & coef$rhs == 'TEMP.l'],0,0,0,
+              coef$est[coef$lhs == 'TEMP' & coef$op == '~1'],0,coef$est[coef$lhs == 'TEMP' & coef$rhs == 'GWP.l'],coef$est[coef$lhs == 'TEMP' & coef$rhs == 'humidity.l'],coef$est[coef$lhs == 'TEMP' & coef$rhs == 'TEMP.l'],0,0,0,
+              coef$est[coef$lhs == 'Mass' & coef$op == '~1'],0,0,0,0,coef$est[coef$lhs == 'Mass' & coef$rhs == 'Mass.l'],0,0,
+              coef$est[coef$lhs == 'SeaIce' & coef$op == '~1'],0,0,0,0,coef$est[coef$lhs == 'SeaIce' & coef$rhs == 'Mass.l'],coef$est[coef$lhs == 'SeaIce' & coef$rhs == 'SeaIce.l'],0,
+              coef$est[coef$lhs == 'GMSL' & coef$op == '~1'],0,0,0,0,coef$est[coef$lhs == 'GMSL' & coef$rhs == 'Mass.l'],coef$est[coef$lhs == 'GMSL' & coef$rhs == 'SeaIce.l'],coef$est[coef$lhs == 'GMSL' & coef$rhs == 'GMSL.l']), byrow = T, nrow = 7)
+
+
+for(i in 1:79){
+  estimate_no <- cbind(estimate_no,c(1,inv(A)%*%B%*%estimate_no[,ncol(estimate_no)]))
+  if(i == 1) estimate_no[3,ncol(estimate_no)] <- pred_GWP_norm_no$mean[1]
+}
+pred_TEMP_no <- estimate_no[5,] #pre-industrial baseline
+pred_GMSL_no <- estimate_no[8,] # 1986-2005 baseline
+```
+
+```{r}
+estimate_cop <- matrix(c(1, climate_norm$GWP[71], climate_norm$GWP[72], climate_norm$humidity[72], climate_norm$TEMP[72], climate_norm$Mass[72], climate_norm$SeaIce[72], climate_norm$GMSL[72]),nrow = 8)
+
+A <- matrix(c(1,rep(0,6),
+              0,1,rep(0,5),
+              0,0,1,rep(0,4),
+              0,0,-coef$est[coef$lhs == 'TEMP' & coef$rhs == 'humidity'],1,rep(0,3),
+              rep(0,3),-coef$est[coef$lhs == 'Mass' & coef$rhs == 'TEMP'],1,0,0,
+              rep(0,3),-coef$est[coef$lhs == 'SeaIce' & coef$rhs == 'TEMP'],0,1,0,
+              rep(0,3),-coef$est[coef$lhs == 'GMSL' & coef$rhs == 'TEMP'],0,0,1), byrow = T, nrow= 7)
+
+B <- matrix(c(0,0,1,rep(0,5),
+              fit_GWP_norm$coef[3]*(1-fit_GWP_norm$coef[1]),-fit_GWP_norm$coef[1],1+fit_GWP_norm$coef[1],rep(0,5),
+              coef$est[coef$lhs == 'humidity' & coef$op == '~1'], 0,0,coef$est[coef$lhs == 'humidity' & coef$rhs == 'humidity.l'],coef$est[coef$lhs == 'humidity' & coef$rhs == 'TEMP.l'],0,0,0,
+              coef$est[coef$lhs == 'TEMP' & coef$op == '~1'],0,coef$est[coef$lhs == 'TEMP' & coef$rhs == 'GWP.l'],coef$est[coef$lhs == 'TEMP' & coef$rhs == 'humidity.l'],coef$est[coef$lhs == 'TEMP' & coef$rhs == 'TEMP.l'],0,0,0,
+              coef$est[coef$lhs == 'Mass' & coef$op == '~1'],0,0,0,0,coef$est[coef$lhs == 'Mass' & coef$rhs == 'Mass.l'],0,0,
+              coef$est[coef$lhs == 'SeaIce' & coef$op == '~1'],0,0,0,0,coef$est[coef$lhs == 'SeaIce' & coef$rhs == 'Mass.l'],coef$est[coef$lhs == 'SeaIce' & coef$rhs == 'SeaIce.l'],0,
+              coef$est[coef$lhs == 'GMSL' & coef$op == '~1'],0,0,0,0,coef$est[coef$lhs == 'GMSL' & coef$rhs == 'Mass.l'],coef$est[coef$lhs == 'GMSL' & coef$rhs == 'SeaIce.l'],coef$est[coef$lhs == 'GMSL' & coef$rhs == 'GMSL.l']), byrow = T, nrow = 7)
+
+for(i in 1:79){
+  estimate_cop <- cbind(estimate_cop,c(1,inv(A)%*%B%*%estimate_cop[,ncol(estimate_cop)]))
+  estimate_cop[3,ncol(estimate_cop)] <- pred_GWP_norm_cop[i]
+}
+pred_TEMP_cop <- estimate_cop[5,]
+pred_GMSL_cop <- estimate_cop[8,]
+```
+
+# Uncertainty
+
+```{r}
+vcv <- cov(cbind(fit_GWP_norm$residuals[-1], 
+                 humidity_res, 
+                 TEMP_res,
+                 Mass_res,
+                 SeaIce_res, 
+                 GMSL_res))
+vcv[1,1] <- fit_GWP_norm$sigma2 
+
+vcv <- rbind(matrix(rep(0,6*78),ncol = 6), vcv)
+vcv <- cbind(matrix(rep(0,78*84),ncol = 78), vcv)
+A <- eye(84)
+A[81,80] <- -coef$est[coef$lhs == 'TEMP' & coef$rhs == 'humidity']
+A[82,81] <- -coef$est[coef$lhs == 'Mass' & coef$rhs == 'TEMP']
+A[83,81] <- -coef$est[coef$lhs == 'SeaIce' & coef$rhs == 'TEMP']
+A[84,81] <- -coef$est[coef$lhs == 'GMSL' & coef$rhs == 'TEMP']
+
+B <- zeros(84)
+for(i in 1:78) B[i,i+1] <- 1
+B[79,1:79] <- rev(-ARMAtoAR(ar = c(1+fit_GWP_norm$coef[1],-fit_GWP_norm$coef[1]), ma=fit_GWP_norm$coef[2], lag.max = 79))
+B[80,80] <- coef$est[coef$lhs == 'humidity' & coef$rhs == 'humidity.l']
+B[80,81] <- coef$est[coef$lhs == 'humidity' & coef$rhs == 'TEMP.l']
+B[81,79] <- coef$est[coef$lhs == 'TEMP' & coef$rhs == 'GWP.l']
+B[81,80] <- coef$est[coef$lhs == 'TEMP' & coef$rhs == 'humidity.l']
+B[81,81] <- coef$est[coef$lhs == 'TEMP' & coef$rhs == 'TEMP.l']
+B[82,82] <- coef$est[coef$lhs == 'Mass' & coef$rhs == 'Mass.l']
+B[83,82] <- coef$est[coef$lhs == 'SeaIce' & coef$rhs == 'Mass.l']
+B[83,83] <- coef$est[coef$lhs == 'SeaIce' & coef$rhs == 'SeaIce.l']
+B[84,82] <- coef$est[coef$lhs == 'GMSL' & coef$rhs == 'Mass.l']
+B[84,83] <- coef$est[coef$lhs == 'GMSL' & coef$rhs == 'SeaIce.l']
+B[84,84] <- coef$est[coef$lhs == 'GMSL' & coef$rhs == 'GMSL.l']
+
+sigma <- zeros(84)
+
+tmp <- inv(A) %*% vcv %*% t(inv(A))
+
+sigma_GWP_no <- c()
+sigma_TEMP_no <- c()
+sigma_GMSL_no <- c()
+
+for(i in 1:79){
+  sigma <- inv(A) %*% B %*% sigma %*% t(B) %*% t(inv(A)) + tmp
+  sigma_GWP_no <-  c(sigma_GWP_no, sigma[79,79])
+  sigma_TEMP_no <- c(sigma_TEMP_no, sigma[81,81])
+  sigma_GMSL_no <- c(sigma_GMSL_no, sigma[84,84])
+}
+```
+
+```{r}
+sigma_GWP_cop <- sigma_GWP_no * (pred_GWP_cop$mean / pred_GWP_no$mean)^2
+```
+
+```{r}
+vcv_cop <- cov(cbind(fit_GWP_norm$residuals[-1], 
+                 humidity_res, 
+                 TEMP_res,
+                 Mass_res,
+                 SeaIce_res, 
+                 GMSL_res))
+vcv_cop[1,1] <- fit_GWP_norm$sigma2 
+
+A <- eye(6)
+A[3,2] <- -coef$est[coef$lhs == 'TEMP' & coef$rhs == 'humidity']
+A[4,3] <- -coef$est[coef$lhs == 'Mass' & coef$rhs == 'TEMP']
+A[5,3] <- -coef$est[coef$lhs == 'SeaIce' & coef$rhs == 'TEMP']
+A[6,3] <- -coef$est[coef$lhs == 'GMSL' & coef$rhs == 'TEMP']
+
+B <- zeros(6)
+B[1,1] <- 1
+B[2,2] <- coef$est[coef$lhs == 'humidity' & coef$rhs == 'humidity.l']
+B[2,3] <- coef$est[coef$lhs == 'humidity' & coef$rhs == 'TEMP.l']
+B[3,1] <- coef$est[coef$lhs == 'TEMP' & coef$rhs == 'GWP.l']
+B[3,2] <- coef$est[coef$lhs == 'TEMP' & coef$rhs == 'humidity.l']
+B[3,3] <- coef$est[coef$lhs == 'TEMP' & coef$rhs == 'TEMP.l']
+B[4,4] <- coef$est[coef$lhs == 'Mass' & coef$rhs == 'Mass.l']
+B[5,4] <- coef$est[coef$lhs == 'SeaIce' & coef$rhs == 'Mass.l']
+B[5,5] <- coef$est[coef$lhs == 'SeaIce' & coef$rhs == 'SeaIce.l']
+B[6,4] <- coef$est[coef$lhs == 'GMSL' & coef$rhs == 'Mass.l']
+B[6,5] <- coef$est[coef$lhs == 'GMSL' & coef$rhs == 'SeaIce.l']
+B[6,6] <- coef$est[coef$lhs == 'GMSL' & coef$rhs == 'GMSL.l']
+
+
+sigma_cop <- zeros(6)
+
+tmp <- inv(A) %*% vcv_cop %*% t(inv(A))
+
+sigma_TEMP_cop <- c()
+sigma_GMSL_cop <- c()
+
+for(i in 1:79){
+  sigma_cop <- inv(A) %*% B %*% sigma_cop %*% t(B) %*% t(inv(A)) + tmp
+  r_sigma <- sqrt(sigma_GWP_cop[i]/sigma_cop[1,1])
+  sigma_cop[1,] <- sigma_cop[1,] *  r_sigma
+  sigma_cop[,1] <- sigma_cop[,1] *  r_sigma
+  sigma_TEMP_cop <- c(sigma_TEMP_cop, sigma_cop[3,3])
+  sigma_GMSL_cop <- c(sigma_GMSL_cop, sigma_cop[6,6])
+}
+```
+
+```{r}
+TEMP_prediction <- data.frame(Year = 1950:2100, 
+                              mean_no = c(climate_norm$TEMP[-72], pred_TEMP_no), 
+                              up95_no = c(rep(NA,71),pred_TEMP_no[1], pred_TEMP_no[-1] + qnorm(0.975) * sqrt(sigma_TEMP_no)), 
+                              low95_no = c(rep(NA,71),pred_TEMP_no[1], pred_TEMP_no[-1] - qnorm(0.975) * sqrt(sigma_TEMP_no)), 
+                              up99_no = c(rep(NA,71),pred_TEMP_no[1], pred_TEMP_no[-1] + qnorm(0.995) * sqrt(sigma_TEMP_no)), 
+                              low99_no = c(rep(NA,71),pred_TEMP_no[1], pred_TEMP_no[-1] - qnorm(0.995) * sqrt(sigma_TEMP_no)), 
+                              mean_cop = c(climate_norm$TEMP[-72], pred_TEMP_cop), 
+                              up95_cop = c(rep(NA,71),pred_TEMP_cop[1], pred_TEMP_cop[-1] + qnorm(0.975) * sqrt(sigma_TEMP_cop)),
+                              low95_cop = c(rep(NA,71),pred_TEMP_cop[1], pred_TEMP_cop[-1] - qnorm(0.975) * sqrt(sigma_TEMP_cop)),
+                              up99_cop = c(rep(NA,71),pred_TEMP_cop[1], pred_TEMP_cop[-1] + qnorm(0.995) * sqrt(sigma_TEMP_cop)),
+                              low99_cop = c(rep(NA,71),pred_TEMP_cop[1], pred_TEMP_cop[-1] - qnorm(0.995) * sqrt(sigma_TEMP_cop)),
+                              sigma_no = c(rep(NA,72), sqrt(sigma_TEMP_no)),
+                              sigma_cop = c(rep(NA,72), sqrt(sigma_TEMP_cop)))
+
+for(i in 2:11){
+  TEMP_prediction[,i] <- denormalize(TEMP_prediction[,i], TEMP_mean, TEMP_sd) + 0.306 #preindustrial base
+}
+
+TEMP_prediction$sigma_no <- TEMP_prediction$sigma_no * TEMP_sd
+TEMP_prediction$sigma_cop <- TEMP_prediction$sigma_cop * TEMP_sd
+
+GMSL_prediction <- data.frame(Year = 1950:2100, 
+                              mean_no = c(climate_norm$GMSL[-72], pred_GMSL_no), 
+                              up95_no = c(rep(NA,71),pred_GMSL_no[1], pred_GMSL_no[-1] + qnorm(0.975) * sqrt(sigma_GMSL_no)), 
+                              low95_no = c(rep(NA,71),pred_GMSL_no[1], pred_GMSL_no[-1] - qnorm(0.975) * sqrt(sigma_GMSL_no)), 
+                              up99_no = c(rep(NA,71),pred_GMSL_no[1], pred_GMSL_no[-1] + qnorm(0.995) * sqrt(sigma_GMSL_no)), 
+                              low99_no = c(rep(NA,71),pred_GMSL_no[1], pred_GMSL_no[-1] - qnorm(0.995) * sqrt(sigma_GMSL_no)), 
+                              mean_cop = c(climate_norm$GMSL[-72], pred_GMSL_cop),
+                              up95_cop = c(rep(NA,71),pred_GMSL_cop[1], pred_GMSL_cop[-1] + qnorm(0.975) * sqrt(sigma_GMSL_cop)),
+                              low95_cop = c(rep(NA,71),pred_GMSL_cop[1], pred_GMSL_cop[-1] - qnorm(0.975) * sqrt(sigma_GMSL_cop)),
+                              up99_cop = c(rep(NA,71),pred_GMSL_cop[1], pred_GMSL_cop[-1] + qnorm(0.995) * sqrt(sigma_GMSL_cop)),
+                              low99_cop = c(rep(NA,71),pred_GMSL_cop[1], pred_GMSL_cop[-1] - qnorm(0.995) * sqrt(sigma_GMSL_cop)),
+                              sigma_no = c(rep(NA,72),sqrt(sigma_GMSL_no)),
+                              sigma_cop = c(rep(NA,72),sqrt(sigma_GMSL_cop)))
+
+for(i in 2:11){
+  GMSL_prediction[,i] <- denormalize(GMSL_prediction[,i], GMSL_mean, GMSL_sd) - mean(climate$GMSL[37:56]) #baseline 1986-2005
+}
+
+GMSL_prediction$sigma_no <- GMSL_prediction$sigma_no * GMSL_sd
+GMSL_prediction$sigma_cop <- GMSL_prediction$sigma_cop * GMSL_sd
+
+```
+
+```{r}
+# write.csv(TEMP_prediction, '../Data/TEMP_prediction_SEM.csv', row.names = F)
+# write.csv(GMSL_prediction, '../Data/GMSL_prediction_SEM.csv', row.names = F)
+```
+
